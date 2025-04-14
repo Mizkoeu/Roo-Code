@@ -23,6 +23,7 @@ import { telemetryService } from "./services/telemetry/TelemetryService"
 import { TerminalRegistry } from "./integrations/terminal/TerminalRegistry"
 import { API } from "./exports/api"
 import { migrateSettings } from "./utils/migrateSettings"
+import { RemoteServer } from "./services/remote/RemoteServer"
 
 import { handleUri, registerCommands, registerCodeActions, registerTerminalActions } from "./activate"
 import { formatLanguage } from "./shared/language"
@@ -37,6 +38,7 @@ import { formatLanguage } from "./shared/language"
 
 let outputChannel: vscode.OutputChannel
 let extensionContext: vscode.ExtensionContext
+let remoteServer: RemoteServer | undefined
 
 // This method is called when your extension is activated.
 // Your extension is activated the very first time the command is executed.
@@ -121,7 +123,21 @@ export async function activate(context: vscode.ExtensionContext) {
 	// Implements the `RooCodeAPI` interface.
 	const socketPath = process.env.ROO_CODE_IPC_SOCKET_PATH
 	const enableLogging = typeof socketPath === "string"
-	return new API(outputChannel, provider, socketPath, enableLogging)
+	const api = new API(outputChannel, provider, socketPath, enableLogging)
+
+	// Initialize and start the RemoteServer if remote control is needed
+	try {
+		// Default port is 9876, can be changed through environment variable
+		const remotePort = process.env.ROO_CODE_REMOTE_PORT ? parseInt(process.env.ROO_CODE_REMOTE_PORT) : 9876
+		remoteServer = new RemoteServer(outputChannel, provider, api, remotePort)
+		remoteServer.start().catch((err) => {
+			outputChannel.appendLine(`Failed to start RemoteServer: ${err.message}`)
+		})
+	} catch (err) {
+		outputChannel.appendLine(`Error initializing RemoteServer: ${err instanceof Error ? err.message : String(err)}`)
+	}
+
+	return api
 }
 
 // This method is called when your extension is deactivated
@@ -133,4 +149,13 @@ export async function deactivate() {
 
 	// Clean up terminal handlers
 	TerminalRegistry.cleanup()
+
+	// Clean up RemoteServer if it was initialized
+	if (remoteServer) {
+		try {
+			await remoteServer.stop()
+		} catch (err) {
+			outputChannel.appendLine(`Error stopping RemoteServer: ${err instanceof Error ? err.message : String(err)}`)
+		}
+	}
 }
