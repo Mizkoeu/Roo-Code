@@ -8,9 +8,10 @@ import fs from "fs" // Added for file system access
 const WebSocketServer = require("ws").Server
 import { EventEmitter } from "events"
 import { Buffer } from "buffer"
-import { ClineProvider } from "../../core/webview/ClineProvider"
+import { ClineProvider, ClineProviderEvents } from "../../core/webview/ClineProvider" // Import events type
 import { API } from "../../exports/api"
-import { ClineMessage, ApiConfigMeta } from "../../schemas"
+import { ClineMessage, ApiConfigMeta, ProviderSettings } from "../../schemas"
+import { Cline } from "../../core/Cline" // Import Cline type
 import { getModeBySlug, modes as builtInModes } from "../../shared/modes" // Import built-in modes
 // WebSocket constants that should be available
 const WS_OPEN = 1 // WebSocket.OPEN value
@@ -36,6 +37,9 @@ export class RemoteServer {
 	}
 
 	private setupWebSocket(): void {
+		// Log WebSocket setup
+		this.log(`Setting up WebSocket server on path /ws for port ${this.port}`)
+
 		this.wss.on("connection", (socket: any) => {
 			// Use 'any' type for WebSocket to avoid TypeScript errors
 			this.log("New WebSocket connection established")
@@ -163,11 +167,28 @@ export class RemoteServer {
 									const profile = profiles.find((p) => p.id === modelId)
 
 									if (profile?.name) {
-										// Set the active profile
-										await this.api.setActiveProfile(profile.name)
+										// 1. Load config by ID. This also sets it as the active config internally.
+										this.log(`Loading config by ID and setting as active: ${modelId}`)
+										const { config: apiConfig, name: loadedName } =
+											await this.provider.providerSettingsManager.loadConfigById(modelId)
 
-										// Get the updated configuration with the new profile
-										const updatedConfig = this.api.getConfiguration()
+										// Verify the loaded name matches the expected profile name (sanity check)
+										if (loadedName !== profile.name) {
+											this.log(
+												`Warning: Name mismatch. Profile found: ${profile.name}, Loaded config name: ${loadedName}`,
+											)
+											// Trust the loaded name if there's a mismatch, which we do by using loadedName below.
+										}
+
+										// 2. Update the global state context with the active name
+										this.log(`Updating contextProxy currentApiConfigName: ${loadedName}`)
+										await this.provider.contextProxy.setValue("currentApiConfigName", loadedName)
+
+										this.log(`Updating technical API configuration object for ${loadedName}`)
+										await this.provider.updateApiConfiguration(apiConfig)
+
+										// 4. Set the active profile in the provider
+										await this.provider.postStateToWebview()
 
 										// Send explicit model_switched confirmation to the client that requested it
 										if (socket.readyState === WS_OPEN) {
@@ -185,11 +206,10 @@ export class RemoteServer {
 										// Force a full state update to all clients
 										const state = await this.provider.getStateToPostToWebview()
 
-										// State should already include the updated configuration
-										// since we called setActiveProfile which updates the state
+										// Broadcast the updated state to all clients
 										this.broadcast({ type: "state_update", payload: state })
 
-										this.log(`Successfully set active profile to: ${profile.name} (ID: ${modelId})`)
+										this.log(`Successfully set active profile: ${loadedName} (ID: ${modelId})`) // Use loadedName for accuracy
 									} else {
 										this.log(`Error: Profile with ID '${modelId}' not found.`)
 										if (socket.readyState === WS_OPEN) {
@@ -221,15 +241,68 @@ export class RemoteServer {
 						}
 						case "tool_response":
 							if (data.payload && data.payload.approve !== undefined) {
-								if (data.payload.approve) {
-									await this.api.pressPrimaryButton()
-								} else {
-									await this.api.pressSecondaryButton()
-									if (data.payload.text) {
-										setTimeout(async () => {
-											await this.api.sendMessage(data.payload.text)
-										}, 500)
+								this.log(`Received tool response: ${JSON.stringify(data.payload)}`)
+
+								try {
+									if (data.payload.approve) {
+										this.log("Approving tool use")
+										await this.api.pressPrimaryButton()
+
+										// Send confirmation message to clients
+										this.broadcast({
+											type: "cline_message",
+											payload: {
+												type: "system",
+												role: "system",
+												messageType: "system",
+												text: "Tool approved",
+												approved: true,
+												ts: Date.now(), // Add timestamp for proper ordering
+											},
+										})
+									} else {
+										this.log("Rejecting tool use")
+										await this.api.pressSecondaryButton()
+
+										// Send rejection message to clients
+										this.broadcast({
+											type: "cline_message",
+											payload: {
+												type: "system",
+												role: "system",
+												messageType: "system",
+												text: "Tool rejected",
+												denied: true,
+												ts: Date.now(), // Add timestamp for proper ordering
+											},
+										})
+
+										// Handle additional feedback if provided
+										if (data.payload.text) {
+											this.log(`Sending additional feedback: ${data.payload.text}`)
+											setTimeout(async () => {
+												await this.api.sendMessage(data.payload.text)
+											}, 500)
+										}
 									}
+
+									// Force a state update to ensure UI is refreshed
+									const state = await this.provider.getStateToPostToWebview()
+									this.broadcast({ type: "state_update", payload: state })
+								} catch (error) {
+									this.log(
+										`Error handling tool response: ${error instanceof Error ? error.message : String(error)}`,
+									)
+									this.broadcast({
+										type: "cline_message",
+										payload: {
+											type: "system",
+											role: "system",
+											messageType: "error",
+											text: `Error handling tool response: ${error instanceof Error ? error.message : String(error)}`,
+											ts: Date.now(), // Add timestamp for proper ordering
+										},
+									})
 								}
 							}
 							break
@@ -267,15 +340,17 @@ export class RemoteServer {
 		// Determine the frontend directory relative to extension path
 		const extensionPath = vscode.extensions.getExtension("Roo-Labs.roocode")?.extensionPath || __dirname
 
+		const frontendBuildPath = path.join(extensionPath, "frontend", "build")
 		const webviewUiPath = path.join(extensionPath, "webview-ui", "build")
+
 		// Additional fallbacks for development scenarios
 		const fallbackPaths = [
-			path.join(extensionPath, "frontend", "build"), // Frontend build output
+			webviewUiPath, // Webview UI build from official Roo Code
 			path.join(extensionPath, "..", "frontend", "build"), // During development
 		]
 
-		if (fs.existsSync(webviewUiPath)) {
-			this.frontendDir = webviewUiPath
+		if (fs.existsSync(frontendBuildPath)) {
+			this.frontendDir = frontendBuildPath
 			this.log(`Serving webview-ui frontend from: ${this.frontendDir}`)
 		} else {
 			// Try fallback paths
@@ -303,6 +378,20 @@ export class RemoteServer {
 	 * Starts the server on the specified port
 	 */
 	public start(): Promise<void> {
+		this.log(`Attempting to start remote server on port ${this.port}`)
+
+		// Check if the frontend directory is properly set
+		if (this.frontendDir) {
+			this.log(`Frontend directory path: ${this.frontendDir}`)
+			if (fs.existsSync(this.frontendDir)) {
+				this.log(`Frontend directory exists. Content: ${fs.readdirSync(this.frontendDir).join(", ")}`)
+			} else {
+				this.log(`WARNING: Frontend directory does not exist: ${this.frontendDir}`)
+			}
+		} else {
+			this.log(`WARNING: Frontend directory not set. Will serve minimal UI.`)
+		}
+
 		return new Promise((resolve) => {
 			this.server.listen(this.port, () => {
 				this.log(`Remote server started on port ${this.port}`)
@@ -361,6 +450,7 @@ export class RemoteServer {
 	}
 
 	private setupExpress() {
+		this.log(`Setting up Express server on port ${this.port}`)
 		this.app.use(express.json())
 
 		// Set up CORS headers for cross-origin requests (adjust origin in production)
@@ -372,6 +462,12 @@ export class RemoteServer {
 				return res.sendStatus(200)
 			}
 			return next()
+		})
+
+		// Log all requests
+		this.app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+			this.log(`HTTP ${req.method} ${req.path}`)
+			next()
 		})
 
 		// Status endpoint
@@ -454,14 +550,44 @@ export class RemoteServer {
 			try {
 				if (approve) {
 					await this.api.pressPrimaryButton()
+
+					// Send confirmation message to clients
+					this.broadcast({
+						type: "cline_message",
+						payload: {
+							type: "system",
+							role: "system",
+							messageType: "system",
+							text: "Tool approved",
+							approved: true,
+						},
+					})
 				} else {
 					await this.api.pressSecondaryButton()
+
+					// Send rejection message to clients
+					this.broadcast({
+						type: "cline_message",
+						payload: {
+							type: "system",
+							role: "system",
+							messageType: "system",
+							text: "Tool rejected",
+							denied: true,
+						},
+					})
+
 					if (text) {
 						setTimeout(async () => {
 							await this.api.sendMessage(text)
 						}, 500)
 					}
 				}
+
+				// Force a state update to ensure UI is refreshed
+				const state = await this.provider.getStateToPostToWebview()
+				this.broadcast({ type: "state_update", payload: state })
+
 				return res.json({ status: "success" })
 			} catch (err) {
 				return res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
@@ -504,6 +630,73 @@ export class RemoteServer {
 			}
 		})
 
+		// Get pending tool approval status
+		this.app.get("/api/pending-approvals", async (req: express.Request, res: express.Response) => {
+			try {
+				// Get the current state from the provider
+				const state = (await this.provider.getStateToPostToWebview()) as any
+
+				this.log(
+					`Checking for pending approvals in state: ${JSON.stringify({
+						hasPendingAsk: !!state?.pendingAsk,
+						hasPendingToolUse: !!state?.pendingToolUse,
+						hasActiveAsk: !!state?.activeAsk,
+						hasApprovalButtons: !!state?.webviewState?.showApprovalButtons,
+					})}`,
+				)
+
+				// Check if there's a pending approval in the state
+				// We use a type assertion (as any) to avoid TypeScript errors since the exact state structure may vary
+				const hasPendingApproval =
+					state &&
+					(state.pendingAsk ||
+						state.pendingToolUse ||
+						state.activeAsk ||
+						(state.webviewState && state.webviewState.showApprovalButtons))
+
+				// Also check if there are any messages in the state that require tool approval
+				const hasToolApprovalMessage = state?.clineMessages?.some(
+					(msg: any) => msg.messageType === "tool_approval" && !msg.approved && !msg.denied,
+				)
+
+				if (hasPendingApproval || hasToolApprovalMessage) {
+					// Return information about the pending approval
+					const details: any = {}
+
+					if (state.pendingAsk) details.pendingAsk = state.pendingAsk
+					if (state.pendingToolUse) details.pendingToolUse = state.pendingToolUse
+					if (state.activeAsk) details.activeAsk = state.activeAsk
+					if (state.webviewState?.showApprovalButtons)
+						details.showApprovalButtons = state.webviewState.showApprovalButtons
+
+					// If we found a tool approval message, include its details
+					if (hasToolApprovalMessage) {
+						const toolMessage = state.clineMessages.find(
+							(msg: any) => msg.messageType === "tool_approval" && !msg.approved && !msg.denied,
+						)
+						if (toolMessage) {
+							details.toolApprovalMessage = toolMessage
+						}
+					}
+
+					this.log(`Found pending approval: ${JSON.stringify(details)}`)
+					return res.json({
+						hasPendingApproval: true,
+						details,
+					})
+				}
+
+				// No pending approval found
+				this.log("No pending approvals found")
+				return res.json({ hasPendingApproval: false })
+			} catch (error) {
+				this.log(`Error checking pending approvals: ${error instanceof Error ? error.message : String(error)}`)
+				return res.status(500).json({
+					error: `Failed to check pending approvals: ${error instanceof Error ? error.message : String(error)}`,
+				})
+			}
+		})
+
 		// Remove the old POST /api/mode endpoint as it's handled via WebSocket
 
 		// Simple health check endpoint
@@ -539,7 +732,53 @@ export class RemoteServer {
 					next() // Continue to minimal UI if index.html not found
 				}
 			})
+		} else {
+			// If no frontend directory is available, serve a minimal UI for the root route
+			// Handle the root route
+			this.app.get("/", (req, res) => {
+				res.send(`
+					<html>
+						<head>
+							<title>Roo Code Remote Server</title>
+							<style>
+								body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+								h1 { color: #333; }
+								.container { max-width: 800px; margin: 0 auto; }
+								.api-link { margin-top: 20px; }
+								code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
+							</style>
+						</head>
+						<body>
+							<div class="container">
+								<h1>Roo Code Remote Server</h1>
+								<p>The remote server is running successfully on port ${this.port}.</p>
+								<p>This is a minimal interface since the frontend build was not found.</p>
+								<div class="api-link">
+									<p>Available API endpoints:</p>
+									<ul>
+										<li><code>/api/status</code> - Server status</li>
+										<li><code>/api/conversation</code> - Current conversation state</li>
+										<li><code>/api/config</code> - Configuration data</li>
+										<li><code>/api/profiles</code> - Available LLM profiles</li>
+										<li><code>/health</code> - Health check endpoint</li>
+									</ul>
+								</div>
+							</div>
+						</body>
+					</html>
+				`)
+			})
 		}
+
+		// Add a catch-all route for other non-API routes to prevent "Cannot GET" errors
+		this.app.get("*", (req, res) => {
+			// Skip API routes and health check
+			if (req.path.startsWith("/api/") || req.path === "/ws" || req.path === "/health") {
+				return res.status(404).json({ error: "API endpoint not found" })
+			}
+			// Redirect to root for all other routes
+			return res.redirect("/")
+		})
 	}
 
 	/**
@@ -547,78 +786,39 @@ export class RemoteServer {
 	 * to forward them to connected WebSocket clients
 	 */
 	private registerMessageListener() {
-		// Configure EventEmitter interface for the provider
-		const provider = this.provider as unknown as EventEmitter
+		// Use the properly typed EventEmitter
+		const providerEmitter = this.provider as EventEmitter<ClineProviderEvents>
 
 		// Monitor for new Cline instances
-		provider.on("clineCreated", (cline: any) => {
+		providerEmitter.on("clineCreated", (cline: Cline) => {
 			this.log(`New Cline instance created: ${cline.taskId}`)
-			// Listen for messages from the Cline
-			cline.on("message", (message: { message: ClineMessage }) => {
-				this.broadcastClineMessage(message.message)
-			})
 
-			// Listen for ask events (tool approvals)
-			cline.on("ask", (askMessage: any) => {
-				// Check if it's a tool approval ask
+			// Listen ONLY for 'message' events from the Cline instance
+			cline.on("message", (eventData: { action: "created" | "updated"; message: ClineMessage }) => {
+				const { action, message } = eventData // Keep original structure
+				// Cast to 'any' for property access workaround if needed, but prefer direct access first
+				const msgAny = message as any
+				this.log(
+					`Received cline message event: action=${action}, type=${message.type}, ask=${message.ask}, say=${message.say}`,
+				)
+
+				// For tool approval messages, let broadcastClineMessage handle them
+				// to avoid duplicate messages
 				if (
-					askMessage.ask &&
-					(askMessage.ask.tool || askMessage.ask.command || askMessage.ask.use_mcp_server)
+					action === "created" &&
+					message.type === "ask" &&
+					(message.ask === "tool" ||
+						message.ask === "command" ||
+						message.ask === "use_mcp_server" ||
+						message.ask === "browser_action_launch")
 				) {
-					const toolDetails = askMessage.ask.tool || askMessage.ask.command || askMessage.ask.use_mcp_server
-					const toolMessage = {
-						type: "tool_approval_required",
-						id: Date.now().toString(), // Simple ID for tracking response
-						tool: toolDetails.tool || toolDetails.command || toolDetails.serverName, // Extract relevant name
-						details: JSON.stringify(askMessage.ask, null, 2),
-					}
-					this.broadcast(toolMessage)
+					// Tool approval messages will be handled in broadcastClineMessage
+					this.log(`Tool approval message detected, handling in broadcastClineMessage`)
 				} else {
-					// Broadcast other ask types if needed by the frontend
-					this.broadcast({ type: "ask", payload: askMessage })
+					// Broadcast other messages normally
+					this.broadcastClineMessage(message)
 				}
 			})
-
-			// Listen for state changes to broadcast
-			cline.on("stateChanged", async () => {
-				try {
-					const state = await this.provider.getStateToPostToWebview()
-					this.broadcast({ type: "state_update", payload: state })
-				} catch (err) {
-					this.log(`Error broadcasting state update: ${err instanceof Error ? err.message : String(err)}`)
-				}
-			})
-		})
-
-		// Also listen for state changes directly on the provider (e.g., when task is cleared or model/mode changes)
-		provider.on("stateChanged", async () => {
-			try {
-				// Get the complete state from the provider
-				const state = await this.provider.getStateToPostToWebview()
-
-				// Get the current configuration to ensure we have the most up-to-date settings
-				const currentConfig = this.api.getConfiguration()
-
-				// Create a comprehensive state object that includes everything needed by clients
-				const completeState = {
-					...state,
-					currentMode: state.mode, // Ensure mode is properly named for frontend
-					currentApiConfigName: currentConfig?.currentApiConfigName,
-					listApiConfigMeta: currentConfig?.listApiConfigMeta || [],
-				}
-
-				// Log the key parts of the state being broadcast for debugging
-				this.log(
-					`Broadcasting state update: mode=${completeState.mode}, configName=${completeState.currentApiConfigName}`,
-				)
-
-				// Broadcast the complete state to all clients
-				this.broadcast({ type: "state_update", payload: completeState })
-			} catch (err) {
-				this.log(
-					`Error broadcasting state update from provider: ${err instanceof Error ? err.message : String(err)}`,
-				)
-			}
 		})
 	}
 
@@ -626,17 +826,20 @@ export class RemoteServer {
 	 * Broadcast a Cline message to all connected WebSocket clients
 	 */
 	private broadcastClineMessage(message: ClineMessage) {
-		// Optionally filter messages before broadcasting
-		// e.g., skip partial messages if frontend handles streaming differently
-		// if (message.partial) {
-		// 	return
-		// }
-
 		// Create a properly typed message format
-		const msg = message as any // Cast to access potential dynamic properties
+		const msg = message as any // Cast to access potential dynamic properties safely if needed
 
 		// Determine appropriate role based on message type and content
 		let role = msg.role
+		let finalMessageType = msg.type === "ask" ? msg.ask : msg.say // Default messageType
+		// Access optional 'id' property using bracket notation as workaround
+		const toolId = msg.id ?? Date.now().toString()
+
+		// Ensure message has a timestamp
+		if (!msg.ts) {
+			msg.ts = Date.now()
+		}
+
 		if (!role) {
 			if (msg.type === "say") {
 				switch (msg.say) {
@@ -654,40 +857,66 @@ export class RemoteServer {
 						role = "assistant"
 				}
 			} else if (msg.type === "ask") {
-				switch (msg.ask) {
-					case "tool":
-					case "browser_action_launch":
-					case "use_mcp_server":
-					case "command":
-					case "api_req_failed":
-					case "mistake_limit_reached":
-					case "completion_result":
-						role = "system"
-						break
-					case "followup":
-						role = "assistant"
-						break
-					default:
-						role = "user"
+				const askType = msg.ask
+				// Check if this 'ask' message requires tool approval
+				const isToolApprovalAsk =
+					askType === "tool" ||
+					askType === "command" ||
+					askType === "use_mcp_server" ||
+					askType === "browser_action_launch" // Add other relevant ask types
+
+				if (isToolApprovalAsk) {
+					role = "system" // Tool approval requests are from the system
+					finalMessageType = "tool_approval" // Set specific type for frontend that matches what the UI expects
+					const tool_approval_message = {
+						type: "tool_approval_required", // Keep this type for backend compatibility
+						id: toolId,
+						tool: msg.tool || askType, // Use tool name or ask type
+						details: msg.text || "", // Send text as details
+						ts: Date.now(), // Add timestamp for proper ordering
+						partial: msg.partial || false, // Include partial for streaming if available
+					}
+					this.log(`Broadcasting tool_approval_required: ${JSON.stringify(tool_approval_message)}`)
+					this.broadcast(tool_approval_message)
+					return
+				} else {
+					// Handle other ask types
+					switch (askType) {
+						case "api_req_failed":
+						case "mistake_limit_reached":
+						case "completion_result":
+						case "finishTask": // Assuming this might exist
+							role = "system"
+							break
+						case "followup":
+							role = "assistant"
+							break
+						default: // e.g., resume_task
+							role = "user"
+					}
+
+					// Format the message for the WebSocket clients
+					const formattedMessage = {
+						type: "cline_message", // Use a specific type for Cline messages
+						payload: {
+							...message, // Spread the original message
+							// Ensure essential fields are present
+							role: role,
+							text: msg.text || msg.content || "",
+							tool: msg.tool || null, // Ensure tool is included if present
+							id: toolId || null, // Ensure id is included if present
+							messageType: finalMessageType, // Use the determined messageType
+							ts: msg.ts, // Include the timestamp
+						},
+					}
+
+					this.log(
+						`Broadcasting formatted cline_message: type=${formattedMessage.payload.messageType}, role=${formattedMessage.payload.role}, id=${formattedMessage.payload.id}`,
+					)
+					this.broadcast(formattedMessage)
 				}
 			}
 		}
-
-		// Format the message for the WebSocket clients
-		const formattedMessage = {
-			type: "cline_message", // Use a specific type for Cline messages
-			payload: {
-				...message, // Spread the original message
-				// Ensure essential fields are present
-				role: role,
-				text: msg.text || msg.content || "",
-				tool: msg.tool || null,
-				// Add message type to help UI handle different message types appropriately
-				messageType: msg.type === "ask" ? msg.ask : msg.say,
-			},
-		}
-
-		this.broadcast(formattedMessage)
 	}
 
 	/**

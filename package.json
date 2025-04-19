@@ -345,6 +345,11 @@
 					"type": "string",
 					"default": "",
 					"description": "%settings.customStoragePath.description%"
+				},
+				"roo-cline.enableRemoteServer": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable the remote server for accessing Roo Code from browser or other devices"
 				}
 			}
 		}

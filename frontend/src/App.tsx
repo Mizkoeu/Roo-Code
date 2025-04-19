@@ -29,6 +29,12 @@ interface ClineMessage {
 	tool?: string
 	messageType?: string
 	partial?: boolean
+	// Additional properties the message might have after processing
+	approved?: boolean
+	denied?: boolean
+	ts?: number // Timestamp for ordering messages
+	say?: string // For system messages
+	ask?: string // For ask messages
 }
 
 interface ToolApprovalMessage {
@@ -36,6 +42,8 @@ interface ToolApprovalMessage {
 	id: string
 	tool: string
 	details: string
+	ts?: number // Add timestamp field
+	partial?: boolean // Add partial field for streaming support
 }
 
 interface WebSocketMessage {
@@ -65,6 +73,7 @@ const App: React.FC = () => {
 	const [modes, setModes] = useState<Mode[]>([])
 	const [currentMode, setCurrentMode] = useState("")
 	const [currentModelId, setCurrentModelId] = useState<string | undefined>(undefined) // Store the ID
+	const [respondingToApproval, setRespondingToApproval] = useState<string | null>(null) // Track which approval ID is being responded to
 
 	// Refs
 	const socketRef = useRef<WebSocket | null>(null)
@@ -77,15 +86,18 @@ const App: React.FC = () => {
 			const host = process.env.REACT_APP_API_HOST || window.location.hostname
 			const port = process.env.REACT_APP_API_PORT || "9876"
 
-			const socket = new WebSocket(`${protocol}//${host}:${port}/ws`)
+			const wsUrl = `${protocol}//${host}:${port}/ws`
+			console.log("Connecting to WebSocket at:", wsUrl)
+
+			const socket = new WebSocket(wsUrl)
 
 			socket.onopen = () => {
-				console.log("WebSocket connected")
+				console.log("WebSocket connected successfully")
 				setIsConnected(true)
 			}
 
-			socket.onclose = () => {
-				console.log("WebSocket disconnected")
+			socket.onclose = (event) => {
+				console.log("WebSocket disconnected with code:", event.code, "reason:", event.reason)
 				setIsConnected(false)
 				// Try to reconnect after a delay
 				setTimeout(connectWebSocket, 3000)
@@ -96,10 +108,13 @@ const App: React.FC = () => {
 			}
 
 			socket.onmessage = (event) => {
-				const data: WebSocketMessage = JSON.parse(event.data)
-				console.log("Received message:", data)
-
-				handleWebSocketMessage(data)
+				try {
+					const data: WebSocketMessage = JSON.parse(event.data)
+					handleWebSocketMessage(data)
+				} catch (error) {
+					console.error("Error handling WebSocket message:", error)
+					console.error("Raw message data:", event.data)
+				}
 			}
 
 			socketRef.current = socket
@@ -177,6 +192,8 @@ const App: React.FC = () => {
 
 	// Handle WebSocket messages
 	const handleWebSocketMessage = (data: WebSocketMessage) => {
+		console.log("Processing WebSocket message type:", data.type)
+
 		switch (data.type) {
 			case "cline_message":
 				if (data.payload) {
@@ -186,46 +203,48 @@ const App: React.FC = () => {
 					const messageText = incomingPayload.text || incomingPayload.content || ""
 
 					setMessages((prev) => {
-						// Find the index of the last message with the same role (compatible way)
+						// Ensure incoming message has a timestamp
+						if (!incomingPayload.ts) {
+							incomingPayload.ts = Date.now()
+						}
+
+						// Find the index of the last message with the same role
 						const reversedIndex = prev
 							.slice()
 							.reverse()
 							.findIndex((msg) => msg.role === incomingPayload.role)
 						const lastMessageIndex = reversedIndex === -1 ? -1 : prev.length - 1 - reversedIndex
 
+						// Case 1: Update existing message if it's the same role and either:
+						// - Current message is partial, or
+						// - Previous message was partial and this one is not (completion of streaming)
 						if (
-							isPartial &&
 							lastMessageIndex !== -1 &&
-							prev[lastMessageIndex].role === incomingPayload.role
+							prev[lastMessageIndex].role === incomingPayload.role &&
+							(isPartial || prev[lastMessageIndex].partial === true)
 						) {
 							// Update the last message of the same role
 							const updatedMessages = [...prev]
 							updatedMessages[lastMessageIndex] = {
-								...updatedMessages[lastMessageIndex], // Keep existing properties like ID if present
-								...incomingPayload, // Overwrite with new payload data (like text)
+								...updatedMessages[lastMessageIndex], // Keep existing properties like ID
+								...incomingPayload, // Overwrite with new payload data
 								text: messageText,
-								partial: true, // Ensure partial is true while streaming
+								partial: isPartial, // Update partial flag based on incoming message
+								// Preserve the original timestamp and role
+								ts: updatedMessages[lastMessageIndex].ts,
+								role: updatedMessages[lastMessageIndex].role || incomingPayload.role || "assistant",
 							}
 							return updatedMessages
 						} else {
-							// Add as a new message (either not partial, or first message from this role)
+							// Add as a new message (different role or not a streaming situation)
 							const newMessage: ClineMessage = {
 								...incomingPayload,
 								text: messageText,
-								partial: isPartial, // Set partial based on incoming data
+								partial: isPartial,
 								// Ensure essential fields are present
 								type: incomingPayload.type || "unknown",
 								role: incomingPayload.role || "assistant",
-							}
-							// If the *previous* message was partial and from the same role, mark it as complete now
-							if (
-								lastMessageIndex !== -1 &&
-								prev[lastMessageIndex].partial &&
-								prev[lastMessageIndex].role === newMessage.role
-							) {
-								const updatedMessages = [...prev]
-								updatedMessages[lastMessageIndex].partial = false
-								return [...updatedMessages, newMessage]
+								ts: incomingPayload.ts || Date.now(),
 							}
 							return [...prev, newMessage]
 						}
@@ -243,17 +262,66 @@ const App: React.FC = () => {
 			case "tool_approval_required":
 				// Special handling for tool approvals
 				const toolApproval = data as ToolApprovalMessage
-				setMessages((prev) => [
-					...prev,
-					{
-						type: "tool_approval",
-						text: `Tool approval required: ${toolApproval.tool}`,
-						tool: toolApproval.tool,
-						id: toolApproval.id,
-						messageType: "tool_approval",
-						role: "system",
-					},
-				])
+				console.log("Received tool approval message:", toolApproval)
+
+				// Check if the message is partial
+				const isPartial = toolApproval.partial === true
+				const messageText = toolApproval.details || ""
+
+				setMessages((prev) => {
+					// Ensure incoming message has a timestamp
+					if (!toolApproval.ts) {
+						toolApproval.ts = Date.now()
+					}
+
+					// Find the index of the last message with the same role
+					const reversedIndex = prev
+						.slice()
+						.reverse()
+						.findIndex((msg) => msg.type === toolApproval.type)
+					const lastMessageIndex = reversedIndex === -1 ? -1 : prev.length - 1 - reversedIndex
+
+					// If we found an existing message with the same ID and either:
+					// - Current message is partial, or
+					// - Previous message was partial and this one is not (completion of streaming)
+					if (
+						lastMessageIndex !== -1 &&
+						prev[lastMessageIndex].type === toolApproval.type &&
+						(isPartial || prev[lastMessageIndex].partial === true)
+					) {
+						// Update the existing message
+						const updatedMessages = [...prev]
+						updatedMessages[lastMessageIndex] = {
+							...updatedMessages[lastMessageIndex], // Keep existing properties like ID
+							text: messageText,
+							tool: toolApproval.tool,
+							partial: isPartial, // Update partial flag based on incoming message
+							// Preserve the original timestamp
+							ts: updatedMessages[lastMessageIndex].ts,
+						}
+						return updatedMessages
+					} else {
+						// Add as a new message (different ID or not a streaming situation)
+						return [
+							...prev,
+							{
+								type: "tool_approval_required",
+								text: messageText,
+								tool: toolApproval.tool,
+								id: toolApproval.id,
+								messageType: "tool_approval_required",
+								role: "system",
+								ts: toolApproval.ts || Date.now(),
+								partial: isPartial,
+							},
+						]
+					}
+				})
+
+				// Only stop loading if the message is NOT partial
+				if (!isPartial) {
+					setIsLoading(false)
+				}
 				break
 
 			case "state_update":
@@ -262,7 +330,64 @@ const App: React.FC = () => {
 
 					// Replace all messages with the new state if available
 					if (data.payload.clineMessages) {
-						setMessages(data.payload.clineMessages)
+						console.log("Updating messages from state update")
+
+						// Process the messages to ensure roles are preserved
+						const processedMessages = data.payload.clineMessages.map((msg: ClineMessage) => {
+							// Ensure each message has a role based on its type/content
+							if (!msg.role) {
+								if (msg.type === "say") {
+									switch (msg.say) {
+										case "api_req_started":
+										case "api_req_finished":
+										case "api_req_retry_delayed":
+										case "error":
+										case "completion_result":
+											msg.role = "system"
+											break
+										case "task":
+											msg.role = "user"
+											break
+										default:
+											msg.role = "assistant"
+									}
+								} else if (msg.type === "ask") {
+									const askType = msg.ask
+									if (
+										askType === "tool" ||
+										askType === "command" ||
+										askType === "use_mcp_server" ||
+										askType === "browser_action_launch"
+									) {
+										msg.role = "system"
+									} else if (askType === "followup") {
+										msg.role = "assistant"
+									} else {
+										msg.role = "user"
+									}
+								}
+							}
+
+							// Ensure timestamp exists
+							if (!msg.ts) {
+								msg.ts = Date.now()
+							}
+
+							return msg
+						})
+
+						// Don't sort messages - keep them in the original order from the server
+						// The backend already sends them in chronological order
+
+						setMessages(processedMessages)
+					}
+
+					// Always reset the respondingToApproval flag when we receive a state update
+					// This ensures buttons will be responsive regardless of previous state
+					console.log("Current respondingToApproval value:", respondingToApproval)
+					if (respondingToApproval) {
+						console.log("Resetting respondingToApproval flag after state update")
+						setRespondingToApproval(null)
 					}
 
 					// Update current mode from state
@@ -296,6 +421,13 @@ const App: React.FC = () => {
 						}
 					}
 
+					// Reset the respondingToApproval flag when we receive a state update
+					// This allows the approval buttons to be used again for future tool approvals
+					if (respondingToApproval) {
+						console.log("Resetting respondingToApproval flag after state update")
+						setRespondingToApproval(null)
+					}
+
 					setIsLoading(false)
 				}
 				break
@@ -313,6 +445,7 @@ const App: React.FC = () => {
 							text: `Mode switched to ${data.payload.mode}`,
 							role: "system",
 							messageType: "system",
+							ts: Date.now(), // Add timestamp for proper ordering
 						},
 					])
 				}
@@ -332,6 +465,7 @@ const App: React.FC = () => {
 							text: `Model switched to ${modelName}`,
 							role: "system",
 							messageType: "system",
+							ts: Date.now(), // Add timestamp for proper ordering
 						},
 					])
 				}
@@ -340,6 +474,12 @@ const App: React.FC = () => {
 	} // End handleWebSocketMessage
 	// Auto-scroll to bottom when messages change
 	useEffect(() => {
+		// Sort messages by timestamp to ensure correct order
+		if (messages.length > 1) {
+			// No need to sort - the backend already sends messages in chronological order
+			// and we append new messages at the end of the array
+		}
+
 		scrollToBottom()
 	}, [messages])
 
@@ -359,6 +499,7 @@ const App: React.FC = () => {
 				role: "user",
 				text: inputValue,
 				messageType: "user",
+				ts: Date.now(), // Add timestamp for proper ordering
 			},
 		])
 
@@ -441,30 +582,90 @@ const App: React.FC = () => {
 
 	// Handle tool approval response
 	const respondToToolApproval = (id: string, approve: boolean, text?: string) => {
-		if (!socketRef.current) return
+		console.log("respondToToolApproval called with:", { id, approve, text })
+		console.log("WebSocket ready state:", socketRef.current ? socketRef.current.readyState : "null")
 
-		socketRef.current.send(
-			JSON.stringify({
+		if (!socketRef.current) {
+			console.error("WebSocket is not available!")
+			return
+		}
+
+		// Check if WebSocket is in OPEN state
+		if (socketRef.current.readyState !== WebSocket.OPEN) {
+			console.error("WebSocket is not in OPEN state. Current state:", socketRef.current.readyState)
+			return
+		}
+
+		try {
+			// Set flag to indicate we are processing this specific approval
+			console.log("Setting respondingToApproval to:", id)
+			setRespondingToApproval(id)
+
+			console.log(`Sending tool response for ID ${id}: ${approve ? "approve" : "reject"}`)
+
+			// Extract tool information from the messages if available
+			const pendingApprovalMsg = messages
+				.slice()
+				.reverse()
+				.find((msg) => msg.messageType === "tool_approval" && !msg.approved && !msg.denied)
+
+			// Try to parse tool info from text if it exists
+			let toolInfo = {}
+			if (pendingApprovalMsg?.text) {
+				try {
+					if (
+						typeof pendingApprovalMsg.text === "string" &&
+						pendingApprovalMsg.text.startsWith("{") &&
+						pendingApprovalMsg.text.includes('"tool"')
+					) {
+						toolInfo = JSON.parse(pendingApprovalMsg.text)
+						console.log("Extracted tool info from message:", toolInfo)
+					}
+				} catch (e) {
+					console.error("Error parsing tool text:", e)
+				}
+			}
+
+			const message = JSON.stringify({
 				type: "tool_response",
 				payload: {
+					id, // Include the message ID in the payload
 					approve,
 					text,
+					tool: pendingApprovalMsg?.tool || (toolInfo as any).tool,
+					toolInfo, // Include the parsed tool info if available
 				},
-			}),
-		)
+			})
 
-		// Update the approval message in our local state
-		setMessages((prev) =>
-			prev.map((msg) =>
+			console.log("Sending WebSocket message:", message)
+			socketRef.current.send(message)
+			console.log("WebSocket message sent successfully")
+		} catch (error) {
+			console.error("Error in respondToToolApproval:", error)
+		}
+
+		// Update the approval message in our local state immediately
+		setMessages((prev) => {
+			console.log("Updating messages to mark approval/rejection")
+			return prev.map((msg) =>
 				msg.id === id
 					? {
 							...msg,
 							text: approve ? "✓ Tool approved" : "✗ Tool denied",
-							messageType: approve ? "approved" : "denied",
+							messageType: "tool_approval", // Keep the messageType consistent
+							approved: approve, // Add a flag for approval state
+							denied: !approve, // Add a flag for denial state
 						}
 					: msg,
-			),
-		)
+			)
+		})
+
+		// Set a short timeout to reset the flag
+		// This ensures buttons will be responsive for future approvals
+		setTimeout(() => {
+			console.log("Timeout: Resetting respondingToApproval flag")
+			setRespondingToApproval(null)
+		}, 1000) // 1 second timeout is enough
 	}
 
 	// Helper function to get a display name for a given model ID
@@ -532,8 +733,9 @@ const App: React.FC = () => {
 						Roo Code
 					</h1>
 					<div className="flex items-center gap-2">
+						{/* Removed "Check Pending" button */}
+
 						{/* Model Selector */}
-						{/* Model Selector (uses currentModelId) */}
 						<select
 							className="bg-gray-700 text-gray-200 py-1 px-3 rounded text-sm border-gray-600 focus:outline-none mr-2"
 							value={currentModelId || ""} // Bind value to the model ID state
@@ -603,8 +805,116 @@ const App: React.FC = () => {
 				</div>
 				{/* Input area - Rearranged */}
 				<div className="flex-shrink-0 border-t border-gray-700 pt-4 pb-6 px-4">
-					{" "}
-					{/* Added px-4 back */}
+					{/* Tool approval buttons above the input when needed */}
+					{/* Find the *last* message that requires approval */}
+					{(() => {
+						const pendingApprovalMsg = messages
+							.slice()
+							.reverse()
+							.find((msg) => msg.messageType === "tool_approval" && !msg.approved && !msg.denied)
+
+						if (pendingApprovalMsg) {
+							return (
+								<div className="flex justify-center mb-4 bg-gray-800 p-3 rounded-lg border border-gray-600">
+									<div className="flex flex-col items-center gap-2">
+										<div className="text-center text-sm mb-1">
+											Tool requires your approval:{" "}
+											<span className="font-medium">
+												{pendingApprovalMsg.tool || "Unknown tool"}
+											</span>
+										</div>
+										<div className="flex gap-3">
+											<button
+												className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg"
+												disabled={false} // Remove the disabled condition completely
+												onClick={() => {
+													console.log("APPROVE button clicked")
+													console.log("pendingApprovalMsg:", pendingApprovalMsg)
+													console.log("respondingToApproval:", respondingToApproval)
+
+													// Generate a fallback ID if none exists
+													let approvalId = pendingApprovalMsg.id
+
+													// If no ID, try to extract tool info from text if it's a JSON string
+													if (!approvalId && pendingApprovalMsg.text) {
+														try {
+															// Check if text is a JSON string with tool info
+															if (
+																typeof pendingApprovalMsg.text === "string" &&
+																pendingApprovalMsg.text.startsWith("{") &&
+																pendingApprovalMsg.text.includes('"tool"')
+															) {
+																const toolData = JSON.parse(pendingApprovalMsg.text)
+																// Use the tool name in the ID if available
+																if (toolData.tool) {
+																	approvalId = `${toolData.tool}-${Date.now()}`
+																}
+															}
+														} catch (e) {
+															console.error("Error parsing tool text:", e)
+														}
+													}
+
+													// Fallback if we still don't have an ID
+													if (!approvalId) {
+														approvalId = `approval-${Date.now()}`
+													}
+
+													console.log("Calling respondToToolApproval with ID:", approvalId)
+													respondToToolApproval(approvalId, true)
+												}}>
+												Approve
+											</button>
+											<button
+												className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg"
+												disabled={false} // Remove the disabled condition completely
+												onClick={() => {
+													console.log("REJECT button clicked")
+													console.log("pendingApprovalMsg:", pendingApprovalMsg)
+													console.log("respondingToApproval:", respondingToApproval)
+
+													// Generate a fallback ID if none exists
+													let approvalId = pendingApprovalMsg.id
+
+													// If no ID, try to extract tool info from text if it's a JSON string
+													if (!approvalId && pendingApprovalMsg.text) {
+														try {
+															// Check if text is a JSON string with tool info
+															if (
+																typeof pendingApprovalMsg.text === "string" &&
+																pendingApprovalMsg.text.startsWith("{") &&
+																pendingApprovalMsg.text.includes('"tool"')
+															) {
+																const toolData = JSON.parse(pendingApprovalMsg.text)
+																// Use the tool name in the ID if available
+																if (toolData.tool) {
+																	approvalId = `${toolData.tool}-${Date.now()}`
+																}
+															}
+														} catch (e) {
+															console.error("Error parsing tool text:", e)
+														}
+													}
+
+													// Fallback if we still don't have an ID
+													if (!approvalId) {
+														approvalId = `approval-${Date.now()}`
+													}
+
+													console.log("Calling respondToToolApproval with ID:", approvalId)
+													respondToToolApproval(approvalId, false)
+												}}>
+												Reject
+											</button>
+										</div>
+									</div>
+								</div>
+							)
+						}
+						return null
+					})()}
+
+					{/* Regular input area */}
 					<div className="flex gap-2 items-end">
 						{/* Buttons on the left */}
 						<button
@@ -707,27 +1017,36 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 
 	const renderContent = () => {
 		// Special handling for tool approvals
-		if (message.messageType === "tool_approval") {
+		if (message.messageType === "tool_approval" || message.messageType === "tool_approval_required") {
+			// Skip duplicate tool approval messages
+			if (message.text && message.text.startsWith("Tool approval required:")) {
+				return null
+			}
+
 			return (
 				<div className="approval">
-					<div className="font-semibold mb-2">{message.text}</div>
-					<div className="text-sm bg-gray-800 p-2 rounded mb-2 overflow-auto max-h-40 border border-gray-700">
-						<div className="font-mono">{message.tool || "Unknown tool"}</div>
-					</div>
-					{onToolResponse && (
-						<div className="flex gap-2">
-							<button
-								className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded"
-								onClick={() => onToolResponse(message.id || "", true)}>
-								Approve
-							</button>
-							<button
-								className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded"
-								onClick={() => onToolResponse(message.id || "", false)}>
-								Deny
-							</button>
+					{message.tool && (
+						<div className="text-sm bg-gray-800 p-2 rounded mb-2 overflow-auto max-h-96 border border-gray-700">
+							<pre className="font-mono whitespace-pre-wrap">
+								{(() => {
+									try {
+										// Try to parse and pretty-print the JSON
+										const toolObj = JSON.parse(message.text || "{}")
+										return JSON.stringify(toolObj, null, 2)
+									} catch (e) {
+										// If it's not valid JSON, just return the raw string
+										return message.text || message.tool || "Unknown tool"
+									}
+								})()}
+							</pre>
 						</div>
 					)}
+					{/*
+					   Tool buttons now appear at the input area instead of in each message
+					   This keeps the message as informational only
+					*/}
+					{message.approved && <div className="text-green-400 font-medium mt-2">✓ Tool approved</div>}
+					{message.denied && <div className="text-red-400 font-medium mt-2">✗ Tool denied</div>}
 				</div>
 			)
 		}
@@ -821,6 +1140,15 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 		}
 
 		// Default rendering for regular messages (Markdown for assistant, plain text otherwise)
+		// Skip rendering assistant messages with empty text and messageType "text"
+		if (
+			message.role === "assistant" &&
+			message.messageType === "text" &&
+			(!message.text || message.text.trim() === "")
+		) {
+			return null
+		}
+
 		return (
 			<>
 				<div className="flex items-center gap-2 mb-2">{getRoleBadge()}</div>
@@ -835,7 +1163,24 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 				{/* Tool indicator if present */}
 				{message.tool && (
 					<div className="tool mt-2">
-						<span className="text-yellow-500 font-semibold">⚙️ Tool:</span> {message.tool}
+						<span className="text-yellow-500 font-semibold">⚙️ Tool:</span>{" "}
+						{(() => {
+							try {
+								// Try to parse the JSON and extract the tool name
+								const toolObj = JSON.parse(message.tool)
+								// Return the tool name if available, otherwise the first few characters
+								return (
+									toolObj.name ||
+									toolObj.tool_name ||
+									(typeof toolObj === "object"
+										? Object.keys(toolObj)[0]
+										: message.tool.substring(0, 30) + (message.tool.length > 30 ? "..." : ""))
+								)
+							} catch (e) {
+								// If it's not valid JSON, just return the first part of the string
+								return message.tool.substring(0, 30) + (message.tool.length > 30 ? "..." : "")
+							}
+						})()}
 					</div>
 				)}
 			</>

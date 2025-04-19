@@ -127,14 +127,72 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// Initialize and start the RemoteServer if remote control is needed
 	try {
-		// Default port is 9876, can be changed through environment variable
-		const remotePort = process.env.ROO_CODE_REMOTE_PORT ? parseInt(process.env.ROO_CODE_REMOTE_PORT) : 9876
-		remoteServer = new RemoteServer(outputChannel, provider, api, remotePort)
-		remoteServer.start().catch((err) => {
-			outputChannel.appendLine(`Failed to start RemoteServer: ${err.message}`)
-		})
+		// Check if remote server is enabled in settings
+		const enableRemoteServer = vscode.workspace
+			.getConfiguration("roo-cline")
+			.get<boolean>("enableRemoteServer", true)
+
+		if (!enableRemoteServer) {
+			outputChannel.appendLine(
+				"RemoteServer is disabled in settings. To enable it, set roo-cline.enableRemoteServer to true.",
+			)
+			vscode.window.showInformationMessage(
+				"Roo Code Remote Server is disabled. To enable it, set roo-cline.enableRemoteServer to true in settings.",
+			)
+		} else {
+			// Default port is 9876, can be changed through environment variable
+			const remotePort = process.env.ROO_CODE_REMOTE_PORT ? parseInt(process.env.ROO_CODE_REMOTE_PORT) : 9876
+			outputChannel.appendLine(`Starting RemoteServer on port ${remotePort}`)
+
+			// Make RemoteServer initialization more visible
+			vscode.window.showInformationMessage(`Initializing Roo Code Remote Server on port ${remotePort}...`)
+
+			remoteServer = new RemoteServer(outputChannel, provider, api, remotePort)
+
+			// Start the remote server and handle any errors
+			remoteServer
+				.start()
+				.then(() => {
+					outputChannel.appendLine(`RemoteServer successfully started on port ${remotePort}`)
+					// Show URL with local IP in notification for easy access
+					const networkInterfaces = require("os").networkInterfaces()
+					const localIPs: string[] = []
+
+					Object.keys(networkInterfaces).forEach((ifName) => {
+						networkInterfaces[ifName].forEach((iface: any) => {
+							if (iface.family === "IPv4" && !iface.internal) {
+								localIPs.push(iface.address)
+							}
+						})
+					})
+
+					const ipInfo =
+						localIPs.length > 0
+							? `Available on your network at: ${localIPs.map((ip) => `http://${ip}:${remotePort}`).join(", ")}`
+							: ""
+
+					vscode.window
+						.showInformationMessage(
+							`Roo Code remote server started on port ${remotePort}. ` +
+								`Open http://localhost:${remotePort} in your browser. ${ipInfo}`,
+							"Open in Browser",
+						)
+						.then((selection) => {
+							if (selection === "Open in Browser") {
+								vscode.env.openExternal(vscode.Uri.parse(`http://localhost:${remotePort}`))
+							}
+						})
+				})
+				.catch((err) => {
+					outputChannel.appendLine(`Failed to start RemoteServer: ${err.message}`)
+					vscode.window.showErrorMessage(`Failed to start Roo Code Remote Server: ${err.message}`)
+				})
+		}
 	} catch (err) {
 		outputChannel.appendLine(`Error initializing RemoteServer: ${err instanceof Error ? err.message : String(err)}`)
+		vscode.window.showErrorMessage(
+			`Error initializing RemoteServer: ${err instanceof Error ? err.message : String(err)}`,
+		)
 	}
 
 	return api
