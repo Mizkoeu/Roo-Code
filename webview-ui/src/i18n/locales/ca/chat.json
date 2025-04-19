@@ -1,5 +1,5 @@
 {
-	"greeting": "Què pot fer Roo per tu?",
+	"greeting": "Benvingut a Roo Code",
 	"task": {
 		"title": "Tasca",
 		"seeMore": "Veure més",
@@ -65,7 +65,7 @@
 		"tooltip": "Cancel·la l'operació actual"
 	},
 	"scrollToBottom": "Desplaça't al final del xat",
-	"aboutMe": "Gràcies als últims avenços en capacitats de codificació intel·ligent, puc gestionar tasques complexes de desenvolupament de programari pas a pas. Amb eines que em permeten crear i editar fitxers, explorar projectes complexos, utilitzar el navegador i executar ordres de terminal (després que em donis permís), puc ajudar-te de maneres que van més enllà de la finalització de codi o el suport tècnic. Fins i tot puc utilitzar MCP per crear noves eines i ampliar les meves capacitats.",
+	"onboarding": "<strong> La vostra llista de tasques en aquest espai de treball està buida. </strong> Comença escrivint una tasca a continuació. \nNo esteu segur per on començar? \nMés informació sobre què pot fer Roo als documents.",
 	"selectMode": "Selecciona el mode d'interacció",
 	"selectApiConfig": "Selecciona la configuració de l'API",
 	"enhancePrompt": "Millora la sol·licitud amb context addicional",
@@ -171,49 +171,7 @@
 	"autoApprove": {
 		"title": "Aprovació automàtica:",
 		"none": "Cap",
-		"description": "L'aprovació automàtica permet a Roo Code realitzar accions sense demanar permís. Activa-la només per a accions en les que confies plenament. Configuració més detallada disponible a la <settingsLink>Configuració</settingsLink>.",
-		"actions": {
-			"readFiles": {
-				"label": "Llegir fitxers i directoris",
-				"shortName": "Lectura",
-				"description": "Permet l'accés per llegir qualsevol fitxer al teu ordinador."
-			},
-			"editFiles": {
-				"label": "Editar fitxers",
-				"shortName": "Edició",
-				"description": "Permet la modificació de qualsevol fitxer al teu ordinador."
-			},
-			"executeCommands": {
-				"label": "Executar ordres aprovades",
-				"shortName": "Ordres",
-				"description": "Permet l'execució d'ordres de terminal aprovades. Pots configurar-ho al panell de configuració."
-			},
-			"useBrowser": {
-				"label": "Utilitzar el navegador",
-				"shortName": "Navegador",
-				"description": "Permet la capacitat d'iniciar i interactuar amb qualsevol lloc web en un navegador headless."
-			},
-			"useMcp": {
-				"label": "Utilitzar servidors MCP",
-				"shortName": "MCP",
-				"description": "Permet l'ús de servidors MCP configurats que poden modificar el sistema de fitxers o interactuar amb APIs."
-			},
-			"switchModes": {
-				"label": "Canviar modes",
-				"shortName": "Modes",
-				"description": "Permet el canvi automàtic entre diferents modes sense requerir aprovació."
-			},
-			"subtasks": {
-				"label": "Crear i completar subtasques",
-				"shortName": "Subtasques",
-				"description": "Permet la creació i finalització de subtasques sense requerir aprovació."
-			},
-			"retryRequests": {
-				"label": "Reintentar sol·licituds fallides",
-				"shortName": "Reintents",
-				"description": "Reintenta automàticament les sol·licituds API fallides quan el proveïdor retorna una resposta d'error."
-			}
-		}
+		"description": "L'aprovació automàtica permet a Roo Code realitzar accions sense demanar permís. Activa-la només per a accions en les que confies plenament. Configuració més detallada disponible a la <settingsLink>Configuració</settingsLink>."
 	},
 	"reasoning": {
 		"thinking": "Pensant",
@@ -223,10 +181,14 @@
 		"copyToInput": "Copiar a l'entrada (o Shift + clic)"
 	},
 	"announcement": {
-		"title": "Fes més amb Tasques Boomerang 🪃",
-		"description": "Divideix la feina en subtasques, cadascuna executant-se en un mode especialitzat, com code, architect, debug o un mode personalitzat.",
-		"learnMore": "Saber-ne més →",
-		"hideButton": "Amagar anunci"
+		"title": "🎉 Roo Code 3.13 publicat",
+		"description": "Roo Code 3.13 porta noves funcionalitats i millores basades en els teus comentaris.",
+		"whatsNew": "Novetats",
+		"feature1": "<bold>Gemini 2.5 Flash Thinking</bold>: Ara pots utilitzar la variant thinking de Gemini 2.5 Flash i especificar un pressupost de tokens per a thinking",
+		"feature2": "<bold>Millores d'interfície</bold>: La capçalera de tasques, la vista de xat, la previsualització d'historial i la vista de benvinguda han estat visualment millorades",
+		"feature3": "<bold>Correccions d'errors</bold>: Edicions de diferències més fiables i més",
+		"hideButton": "Amagar anunci",
+		"detailsDiscussLinks": "Obtingues més detalls i participa a <discordLink>Discord</discordLink> i <redditLink>Reddit</redditLink> 🚀"
 	},
 	"browser": {
 		"rooWantsToUse": "Roo vol utilitzar el navegador:",
