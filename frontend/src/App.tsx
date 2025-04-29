@@ -3,6 +3,8 @@ import { marked } from "marked"
 import hljs from "highlight.js"
 import "highlight.js/styles/atom-one-dark.css"
 import "./App.css"
+import { getRole } from "./utils.ts"
+import { ClineMessage } from "./types"
 
 // --- Types ---
 interface Mode {
@@ -12,38 +14,25 @@ interface Mode {
 
 interface ApiConfiguration {
 	model?: string
-	// Add other configuration properties
 }
 
 interface ModelProfile {
-	id: string // Represents the unique identifier for the model/profile
+	id: string
 	name: string
 }
 
-interface ClineMessage {
-	id?: string
+interface ClineUI {
 	type: string
 	role?: string
 	text?: string
 	content?: string
 	tool?: string
-	messageType?: string
 	partial?: boolean
-	// Additional properties the message might have after processing
 	approved?: boolean
 	denied?: boolean
-	ts?: number // Timestamp for ordering messages
-	say?: string // For system messages
-	ask?: string // For ask messages
-}
-
-interface ToolApprovalMessage {
-	type: "tool_approval_required"
-	id: string
-	tool: string
-	details: string
-	ts?: number // Add timestamp field
-	partial?: boolean // Add partial field for streaming support
+	ts?: number
+	say?: string
+	ask?: string
 }
 
 interface WebSocketMessage {
@@ -51,7 +40,6 @@ interface WebSocketMessage {
 	payload?: any
 	role?: string
 	text?: string
-	messageType?: string
 	tool?: string
 }
 
@@ -59,14 +47,14 @@ interface Config {
 	modes: Mode[]
 	currentMode: string
 	apiConfiguration: ApiConfiguration
-	profiles?: ModelProfile[] // Optional: profiles might come from a different endpoint
+	profiles?: ModelProfile[]
 }
 
 // --- Components ---
 const App: React.FC = () => {
 	// State
 	const [availableModels, setAvailableModels] = useState<ModelProfile[]>([])
-	const [messages, setMessages] = useState<ClineMessage[]>([])
+	const [messages, setMessages] = useState<ClineUI[]>([])
 	const [inputValue, setInputValue] = useState("")
 	const [isConnected, setIsConnected] = useState(false)
 	const [isLoading, setIsLoading] = useState(false)
@@ -168,35 +156,24 @@ const App: React.FC = () => {
 			}
 			const data: ModelProfile[] = await response.json()
 			setAvailableModels(data)
-
-			// If currentModelId is not set after fetching config, maybe set a default?
-			// It's generally better to rely on the config's value.
-			// if (!currentModelId && data.length > 0) {
-			//    setCurrentModelId(data[0].id);
-			// }
 		} catch (error) {
 			console.error("Error fetching profiles:", error)
-			// Provide default/fallback models ONLY if fetch fails
-			setAvailableModels([
-				{ id: "claude-3-opus-20240229", name: "Claude 3 Opus (Default)" },
-				{ id: "claude-3-sonnet-20240229", name: "Claude 3 Sonnet (Default)" },
-				{ id: "claude-3-haiku-20240307", name: "Claude 3 Haiku (Default)" },
-				{ id: "gpt-4o", name: "GPT-4o (Default)" },
-			])
-			// If fetch fails and no model ID is set, maybe set a fallback ID?
-			if (!currentModelId) {
-				setCurrentModelId("claude-3-opus-20240229") // Example fallback
-			}
 		}
 	}
 
 	// Handle WebSocket messages
-	const handleWebSocketMessage = (data: WebSocketMessage) => {
+	const handleWebSocketMessage = useCallback((data: WebSocketMessage) => {
 		console.log("Processing WebSocket message type:", data.type)
 
 		switch (data.type) {
 			case "cline_message":
+			case "tool_approval_required":
 				if (data.payload) {
+					if (data.type === "tool_approval_required") {
+						console.log("Received tool approval message:", data)
+					} else {
+						console.log("Received cline message:", data)
+					}
 					// Add the message to our state
 					const incomingPayload = data.payload
 					const isPartial = incomingPayload.partial === true
@@ -237,7 +214,7 @@ const App: React.FC = () => {
 							return updatedMessages
 						} else {
 							// Add as a new message (different role or not a streaming situation)
-							const newMessage: ClineMessage = {
+							const newMessage: ClineUI = {
 								...incomingPayload,
 								text: messageText,
 								partial: isPartial,
@@ -254,73 +231,6 @@ const App: React.FC = () => {
 					if (!isPartial) {
 						setIsLoading(false)
 					}
-
-					// isLoading is now handled within the setMessages update logic based on partial status
-				}
-				break
-
-			case "tool_approval_required":
-				// Special handling for tool approvals
-				const toolApproval = data as ToolApprovalMessage
-				console.log("Received tool approval message:", toolApproval)
-
-				// Check if the message is partial
-				const isPartial = toolApproval.partial === true
-				const messageText = toolApproval.details || ""
-
-				setMessages((prev) => {
-					// Ensure incoming message has a timestamp
-					if (!toolApproval.ts) {
-						toolApproval.ts = Date.now()
-					}
-
-					// Find the index of the last message with the same role
-					const reversedIndex = prev
-						.slice()
-						.reverse()
-						.findIndex((msg) => msg.type === toolApproval.type)
-					const lastMessageIndex = reversedIndex === -1 ? -1 : prev.length - 1 - reversedIndex
-
-					// If we found an existing message with the same ID and either:
-					// - Current message is partial, or
-					// - Previous message was partial and this one is not (completion of streaming)
-					if (
-						lastMessageIndex !== -1 &&
-						prev[lastMessageIndex].type === toolApproval.type &&
-						(isPartial || prev[lastMessageIndex].partial === true)
-					) {
-						// Update the existing message
-						const updatedMessages = [...prev]
-						updatedMessages[lastMessageIndex] = {
-							...updatedMessages[lastMessageIndex], // Keep existing properties like ID
-							text: messageText,
-							tool: toolApproval.tool,
-							partial: isPartial, // Update partial flag based on incoming message
-							// Preserve the original timestamp
-							ts: updatedMessages[lastMessageIndex].ts,
-						}
-						return updatedMessages
-					} else {
-						// Add as a new message (different ID or not a streaming situation)
-						return [
-							...prev,
-							{
-								type: "tool_approval_required",
-								text: messageText,
-								tool: toolApproval.tool,
-								id: toolApproval.id,
-								messageType: "tool_approval_required",
-								role: "system",
-								ts: toolApproval.ts || Date.now(),
-								partial: isPartial,
-							},
-						]
-					}
-				})
-
-				// Only stop loading if the message is NOT partial
-				if (!isPartial) {
-					setIsLoading(false)
 				}
 				break
 
@@ -334,46 +244,13 @@ const App: React.FC = () => {
 
 						// Process the messages to ensure roles are preserved
 						const processedMessages = data.payload.clineMessages.map((msg: ClineMessage) => {
-							// Ensure each message has a role based on its type/content
-							if (!msg.role) {
-								if (msg.type === "say") {
-									switch (msg.say) {
-										case "api_req_started":
-										case "api_req_finished":
-										case "api_req_retry_delayed":
-										case "error":
-										case "completion_result":
-											msg.role = "system"
-											break
-										case "task":
-											msg.role = "user"
-											break
-										default:
-											msg.role = "assistant"
-									}
-								} else if (msg.type === "ask") {
-									const askType = msg.ask
-									if (
-										askType === "tool" ||
-										askType === "command" ||
-										askType === "use_mcp_server" ||
-										askType === "browser_action_launch"
-									) {
-										msg.role = "system"
-									} else if (askType === "followup") {
-										msg.role = "assistant"
-									} else {
-										msg.role = "user"
-									}
-								}
+							const role = getRole(msg)
+							const message: ClineUI = {
+								...msg,
+								role,
+								ts: msg.ts || Date.now(),
 							}
-
-							// Ensure timestamp exists
-							if (!msg.ts) {
-								msg.ts = Date.now()
-							}
-
-							return msg
+							return message
 						})
 
 						// Don't sort messages - keep them in the original order from the server
@@ -444,7 +321,6 @@ const App: React.FC = () => {
 							type: "system",
 							text: `Mode switched to ${data.payload.mode}`,
 							role: "system",
-							messageType: "system",
 							ts: Date.now(), // Add timestamp for proper ordering
 						},
 					])
@@ -464,14 +340,13 @@ const App: React.FC = () => {
 							type: "system",
 							text: `Model switched to ${modelName}`,
 							role: "system",
-							messageType: "system",
 							ts: Date.now(), // Add timestamp for proper ordering
 						},
 					])
 				}
 				break
 		} // End switch
-	} // End handleWebSocketMessage
+	}, []) // End handleWebSocketMessage
 	// Auto-scroll to bottom when messages change
 	useEffect(() => {
 		// Sort messages by timestamp to ensure correct order
@@ -498,7 +373,6 @@ const App: React.FC = () => {
 				type: "say",
 				role: "user",
 				text: inputValue,
-				messageType: "user",
 				ts: Date.now(), // Add timestamp for proper ordering
 			},
 		])
@@ -581,8 +455,8 @@ const App: React.FC = () => {
 	}
 
 	// Handle tool approval response
-	const respondToToolApproval = (id: string, approve: boolean, text?: string) => {
-		console.log("respondToToolApproval called with:", { id, approve, text })
+	const respondToToolApproval = (ts: number, approve: boolean, text?: string) => {
+		console.log("respondToToolApproval called with:", { ts, approve, text })
 		console.log("WebSocket ready state:", socketRef.current ? socketRef.current.readyState : "null")
 
 		if (!socketRef.current) {
@@ -598,16 +472,16 @@ const App: React.FC = () => {
 
 		try {
 			// Set flag to indicate we are processing this specific approval
-			console.log("Setting respondingToApproval to:", id)
-			setRespondingToApproval(id)
+			console.log("Setting respondingToApproval to:", ts)
+			setRespondingToApproval(ts.toString())
 
-			console.log(`Sending tool response for ID ${id}: ${approve ? "approve" : "reject"}`)
+			console.log(`Sending tool response for timestamp ${ts}: ${approve ? "approve" : "reject"}`)
 
 			// Extract tool information from the messages if available
 			const pendingApprovalMsg = messages
 				.slice()
 				.reverse()
-				.find((msg) => msg.messageType === "tool_approval" && !msg.approved && !msg.denied)
+				.find((msg) => msg.role === "tool" && !msg.approved && !msg.denied)
 
 			// Try to parse tool info from text if it exists
 			let toolInfo = {}
@@ -629,7 +503,7 @@ const App: React.FC = () => {
 			const message = JSON.stringify({
 				type: "tool_response",
 				payload: {
-					id, // Include the message ID in the payload
+					ts, // Include the message timestamp in the payload
 					approve,
 					text,
 					tool: pendingApprovalMsg?.tool || (toolInfo as any).tool,
@@ -648,11 +522,11 @@ const App: React.FC = () => {
 		setMessages((prev) => {
 			console.log("Updating messages to mark approval/rejection")
 			return prev.map((msg) =>
-				msg.id === id
+				msg.ts === ts
 					? {
 							...msg,
 							text: approve ? "✓ Tool approved" : "✗ Tool denied",
-							messageType: "tool_approval", // Keep the messageType consistent
+							type: "tool_approval", // Keep the type consistent
 							approved: approve, // Add a flag for approval state
 							denied: !approve, // Add a flag for denial state
 						}
@@ -811,7 +685,7 @@ const App: React.FC = () => {
 						const pendingApprovalMsg = messages
 							.slice()
 							.reverse()
-							.find((msg) => msg.messageType === "tool_approval" && !msg.approved && !msg.denied)
+							.find((msg) => msg.role === "tool" && !msg.approved && !msg.denied)
 
 						if (pendingApprovalMsg) {
 							return (
@@ -826,83 +700,23 @@ const App: React.FC = () => {
 										<div className="flex gap-3">
 											<button
 												className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg"
-												disabled={false} // Remove the disabled condition completely
 												onClick={() => {
 													console.log("APPROVE button clicked")
 													console.log("pendingApprovalMsg:", pendingApprovalMsg)
 													console.log("respondingToApproval:", respondingToApproval)
-
-													// Generate a fallback ID if none exists
-													let approvalId = pendingApprovalMsg.id
-
-													// If no ID, try to extract tool info from text if it's a JSON string
-													if (!approvalId && pendingApprovalMsg.text) {
-														try {
-															// Check if text is a JSON string with tool info
-															if (
-																typeof pendingApprovalMsg.text === "string" &&
-																pendingApprovalMsg.text.startsWith("{") &&
-																pendingApprovalMsg.text.includes('"tool"')
-															) {
-																const toolData = JSON.parse(pendingApprovalMsg.text)
-																// Use the tool name in the ID if available
-																if (toolData.tool) {
-																	approvalId = `${toolData.tool}-${Date.now()}`
-																}
-															}
-														} catch (e) {
-															console.error("Error parsing tool text:", e)
-														}
-													}
-
-													// Fallback if we still don't have an ID
-													if (!approvalId) {
-														approvalId = `approval-${Date.now()}`
-													}
-
-													console.log("Calling respondToToolApproval with ID:", approvalId)
-													respondToToolApproval(approvalId, true)
+													const ts = pendingApprovalMsg.ts || Date.now()
+													respondToToolApproval(ts, true)
 												}}>
 												Approve
 											</button>
 											<button
 												className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg"
-												disabled={false} // Remove the disabled condition completely
 												onClick={() => {
 													console.log("REJECT button clicked")
 													console.log("pendingApprovalMsg:", pendingApprovalMsg)
 													console.log("respondingToApproval:", respondingToApproval)
-
-													// Generate a fallback ID if none exists
-													let approvalId = pendingApprovalMsg.id
-
-													// If no ID, try to extract tool info from text if it's a JSON string
-													if (!approvalId && pendingApprovalMsg.text) {
-														try {
-															// Check if text is a JSON string with tool info
-															if (
-																typeof pendingApprovalMsg.text === "string" &&
-																pendingApprovalMsg.text.startsWith("{") &&
-																pendingApprovalMsg.text.includes('"tool"')
-															) {
-																const toolData = JSON.parse(pendingApprovalMsg.text)
-																// Use the tool name in the ID if available
-																if (toolData.tool) {
-																	approvalId = `${toolData.tool}-${Date.now()}`
-																}
-															}
-														} catch (e) {
-															console.error("Error parsing tool text:", e)
-														}
-													}
-
-													// Fallback if we still don't have an ID
-													if (!approvalId) {
-														approvalId = `approval-${Date.now()}`
-													}
-
-													console.log("Calling respondToToolApproval with ID:", approvalId)
-													respondToToolApproval(approvalId, false)
+													const ts = pendingApprovalMsg.ts || Date.now()
+													respondToToolApproval(ts, false)
 												}}>
 												Reject
 											</button>
@@ -979,8 +793,8 @@ const App: React.FC = () => {
 
 // Message display component
 interface MessageProps {
-	message: ClineMessage
-	onToolResponse?: (id: string, approve: boolean, text?: string) => void
+	message: ClineUI
+	onToolResponse?: (id: number, approve: boolean, text?: string) => void
 }
 
 const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) => {
@@ -1002,13 +816,13 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 			return { text: "Assistant", bgColor: "bg-green-400", textColor: "text-green-400" }
 		} else if (message.role === "user") {
 			return { text: "You", bgColor: "bg-blue-400", textColor: "text-blue-400" }
-		} else if (message.messageType === "api_req_started" || message.messageType === "api_req_finished") {
+		} else if (message.role === "api_request") {
 			return { text: "API Request", bgColor: "bg-purple-400", textColor: "text-purple-400" }
-		} else if (message.messageType === "tool" || message.messageType === "tool_approval") {
+		} else if (message.role === "tool") {
 			return { text: "Tool", bgColor: "bg-yellow-400", textColor: "text-yellow-400" }
-		} else if (message.messageType === "error" || message.messageType === "api_req_failed") {
+		} else if (message.role === "error" || message.role === "api_req_failed") {
 			return { text: "Error", bgColor: "bg-red-400", textColor: "text-red-400" }
-		} else if (message.messageType === "completion_result") {
+		} else if (message.role === "completion_result") {
 			return { text: "Completed", bgColor: "bg-green-500", textColor: "text-green-500" }
 		} else {
 			return { text: "System", bgColor: "bg-gray-400", textColor: "text-gray-400" }
@@ -1017,34 +831,33 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 
 	const renderContent = () => {
 		// Special handling for tool approvals
-		if (message.messageType === "tool_approval" || message.messageType === "tool_approval_required") {
-			// Skip duplicate tool approval messages
-			if (message.text && message.text.startsWith("Tool approval required:")) {
-				return null
-			}
+		if (message.ask === "tool" || message.role === "tool" || message.type === "tool_approval") {
+			// // Skip duplicate tool approval messages
+			// if (message.text && message.text.startsWith("Tool approval required:")) {
+			//     return null
+			// }
+			console.log("Rendering tool approval message:", message)
 
 			return (
-				<div className="approval">
-					{message.tool && (
-						<div className="text-sm bg-gray-800 p-2 rounded mb-2 overflow-auto max-h-96 border border-gray-700">
-							<pre className="font-mono whitespace-pre-wrap">
-								{(() => {
-									try {
-										// Try to parse and pretty-print the JSON
-										const toolObj = JSON.parse(message.text || "{}")
-										return JSON.stringify(toolObj, null, 2)
-									} catch (e) {
-										// If it's not valid JSON, just return the raw string
-										return message.text || message.tool || "Unknown tool"
-									}
-								})()}
-							</pre>
-						</div>
+				<div>
+					<div className="flex items-center gap-2 mb-2 cursor-pointer" style={{ userSelect: "none" }}>
+						{getRoleBadge()}
+						<span className={`codicon codicon-chevron-${isApiMessageExpanded ? "up" : "down"}`}></span>
+					</div>
+					{message.text && (
+						<pre className="font-mono whitespace-pre-wrap">
+							{(() => {
+								try {
+									// Try to parse and pretty-print the JSON
+									const toolObj = JSON.parse(message.text || "")
+									return JSON.stringify(toolObj, null, 2)
+								} catch (e) {
+									// If it's not valid JSON, just return the raw string
+									return message.text || message.tool || "Unknown tool"
+								}
+							})()}
+						</pre>
 					)}
-					{/*
-					   Tool buttons now appear at the input area instead of in each message
-					   This keeps the message as informational only
-					*/}
 					{message.approved && <div className="text-green-400 font-medium mt-2">✓ Tool approved</div>}
 					{message.denied && <div className="text-red-400 font-medium mt-2">✗ Tool denied</div>}
 				</div>
@@ -1053,9 +866,9 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 
 		// API request or other system message handling
 		if (
-			message.messageType === "api_req_started" ||
-			message.messageType === "api_req_finished" ||
-			message.messageType === "api_req_failed"
+			message.role === "api_request" ||
+			message.role === "api_req_finished" ||
+			message.role === "api_req_failed"
 		) {
 			// Using the component-level state for expanded/collapsed state
 
@@ -1074,7 +887,7 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 		}
 
 		// Completion result
-		if (message.messageType === "completion_result") {
+		if (message.role === "completion_result") {
 			return (
 				<>
 					<div className="flex items-center gap-2 mb-2">{getRoleBadge()}</div>
@@ -1087,18 +900,34 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 
 		// Handle System messages (collapsible, JSON or Markdown)
 		if (message.role === "system") {
-			let content
+			let content: React.ReactNode
 			try {
-				const parsedJson = JSON.parse(message.text || "{}")
-				if (typeof parsedJson === "object" && parsedJson !== null) {
+				if (message.ask === "completion_result") {
 					content = (
-						<pre className="bg-gray-800 p-3 rounded border border-gray-700 overflow-auto text-sm whitespace-pre-wrap break-words">
-							<code className="language-json">{JSON.stringify(parsedJson, null, 2)}</code>
-						</pre>
+						<div className="border-l-2 border-green-500 pl-2">
+							<div dangerouslySetInnerHTML={{ __html: marked("WE ARE DONE!!!") }} />
+						</div>
+					)
+				} else if (message.ask === "checkpoint_saved") {
+					content = (
+						<div className="border-l-2 border-green-500 pl-2">
+							<div dangerouslySetInnerHTML={{ __html: marked("Checkpoint saved...") }} />
+						</div>
 					)
 				} else {
-					// Parsed but wasn't an object/array, treat as markdown
-					content = <div dangerouslySetInnerHTML={{ __html: marked(message.text || "") }} />
+					// Attempt to parse as JSON
+					// If it fails, treat as markdown
+					const parsedJson = JSON.parse(message.text || message.ask || message.content || "{}")
+					if (typeof parsedJson === "object" && parsedJson !== null) {
+						content = (
+							<pre className="bg-gray-800 p-3 rounded border border-gray-700 overflow-auto text-sm whitespace-pre-wrap break-words">
+								<code className="language-json">{JSON.stringify(parsedJson, null, 2)}</code>
+							</pre>
+						)
+					} else {
+						// Parsed but wasn't an object/array, treat as markdown
+						content = <div dangerouslySetInnerHTML={{ __html: marked(message.text || "") }} />
+					}
 				}
 			} catch (e) {
 				// Not valid JSON, render as markdown
@@ -1120,7 +949,7 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 		}
 
 		// Attempt to render Assistant/Tool messages as JSON if applicable
-		if (message.text && (message.role === "assistant" || message.messageType === "tool")) {
+		if (message.text && (message.role === "assistant" || message.role === "tool")) {
 			try {
 				const parsedJson = JSON.parse(message.text)
 				// Check if it's an actual object or array (not just a string/number parsed as JSON)
@@ -1139,13 +968,34 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 			}
 		}
 
+		// Handle tool calls that come in assistant messages
+		if (message.tool) {
+			return (
+				<div className="approval">
+					<div className="flex items-center gap-2 mb-2">{getRoleBadge()}</div>
+					<div className="text-sm bg-gray-800 p-2 rounded mb-2 overflow-auto max-h-96 border border-gray-700">
+						<pre className="font-mono whitespace-pre-wrap">
+							{(() => {
+								try {
+									// Try to parse and pretty-print the JSON
+									const toolObj = JSON.parse(message.tool || "{}")
+									return JSON.stringify(toolObj, null, 2)
+								} catch (e) {
+									// If it's not valid JSON, just return the raw string
+									return message.tool || "Unknown tool"
+								}
+							})()}
+						</pre>
+					</div>
+					{message.approved && <div className="text-green-400 font-medium mt-2">✓ Tool approved</div>}
+					{message.denied && <div className="text-red-400 font-medium mt-2">✗ Tool denied</div>}
+				</div>
+			)
+		}
+
 		// Default rendering for regular messages (Markdown for assistant, plain text otherwise)
-		// Skip rendering assistant messages with empty text and messageType "text"
-		if (
-			message.role === "assistant" &&
-			message.messageType === "text" &&
-			(!message.text || message.text.trim() === "")
-		) {
+		// Skip rendering assistant messages with empty text and type "text"
+		if (message.role === "assistant" && message.type === "text" && (!message.text || message.text.trim() === "")) {
 			return null
 		}
 
@@ -1172,6 +1022,7 @@ const MessageComponent: React.FC<MessageProps> = ({ message, onToolResponse }) =
 								return (
 									toolObj.name ||
 									toolObj.tool_name ||
+									toolObj.tool || // Added extra check for tool property
 									(typeof toolObj === "object"
 										? Object.keys(toolObj)[0]
 										: message.tool.substring(0, 30) + (message.tool.length > 30 ? "..." : ""))

@@ -3,11 +3,13 @@
 	"version": "0.1.0",
 	"private": true,
 	"scripts": {
+		"clean": "rimraf out dist .build build lib resources",
+		"prebuild": "npm run clean",
 		"start": "NODE_ENV=development react-scripts start",
 		"build": "GENERATE_SOURCEMAP=false react-scripts build",
 		"test": "react-scripts test",
 		"eject": "react-scripts eject",
-		"clean": "rimraf build"
+		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
 		"@testing-library/jest-dom": "^5.16.5",
@@ -24,7 +26,7 @@
 		"postcss": "^8.4.23",
 		"react": "^18.2.0",
 		"react-dom": "^18.2.0",
-		"react-scripts": "5.0.1",
+		"react-scripts": "^5.0.1",
 		"tailwindcss": "^3.3.2",
 		"typescript": "~4.9.5",
 		"web-vitals": "^2.1.4"

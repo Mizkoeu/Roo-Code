@@ -48,3 +48,5 @@ _File created during UMB process._
 [2025-04-14 20:20:45] - Updated with detailed technical information from RemoteServer.ts review.
 [2025-04-14 21:26:08] - Added automatic action approval feature to Recent Changes.
 [2025-04-16 23:55:06] - Updated with enhanced model switching and UI improvements.
+
+[2025-04-20 02:36:16] - Fixed bug in frontend UI where tool calls were not being rendered. Updated message rendering logic in App.tsx to properly handle tool calls regardless of message role.

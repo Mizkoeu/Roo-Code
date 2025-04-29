@@ -34,3 +34,5 @@
 
 _File created during UMB process._
 [2025-04-14 02:47:55] - Initial file creation.
+
+- [2025-04-20 02:35:31] - **Tool Call UI Rendering Fix**: Modified the message rendering logic to properly handle tool calls that appear in assistant messages. Added a dedicated rendering branch that triggers based on the presence of the `tool` property regardless of message role, ensuring tool calls are always displayed properly in the UI.

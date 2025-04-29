@@ -4,6 +4,8 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
+		"clean": "rimraf build",
+		"prebuild": "npm run clean",
 		"lint": "eslint src/**/*.ts src/**/*.tsx",
 		"lint-fix": "eslint src/**/*.ts src/**/*.tsx --fix",
 		"check-types": "tsc",
@@ -14,8 +16,7 @@
 		"build": "npm-run-all -p tsc vite-build",
 		"preview": "vite preview",
 		"storybook": "storybook dev -p 6006",
-		"build-storybook": "storybook build",
-		"clean": "rimraf build"
+		"build-storybook": "storybook build"
 	},
 	"dependencies": {
 		"@radix-ui/react-alert-dialog": "^1.1.6",
@@ -97,6 +98,6 @@
 		"storybook-dark-mode": "^4.0.2",
 		"ts-jest": "^29.2.5",
 		"typescript": "^5.4.5",
-		"vite": "6.0.11"
+		"vite": "^6.0.11"
 	}
 }

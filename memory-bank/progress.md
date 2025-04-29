@@ -41,3 +41,11 @@
 - Enhanced tool approval workflow with status feedback
 - Added system messages for mode and model changes
 - Implemented message streaming with partial update support
+
+[2025-04-20 02:36:57] - Fixed UI bug with tool call rendering:
+
+- Identified issue where tool calls were not being rendered in the UI
+- Updated message rendering logic in frontend/src/App.tsx
+- Added dedicated rendering path for messages with tool property
+- Enhanced tool display logic to work regardless of message role
+- Updated project documentation in memory bank
